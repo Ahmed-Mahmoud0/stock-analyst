@@ -46,7 +46,7 @@ FMT = {
     "avg_vol20": st.column_config.NumberColumn("Avg vol 20D", format="compact"),
 }
 LABELS = {k: v["label"] for k, v in FMT.items()}
-UNIVERSES = {"S&P 500": "sp500", "All US stocks": "us", "Egypt (EGX)": "egx"}
+UNIVERSES = {"S&P 500": "sp500", "Egypt (EGX)": "egx"}
 DISCLAIMER = "Mechanical rule outputs (see the explanation at the top), not a recommendation."
 
 
@@ -70,9 +70,8 @@ def pe_map_for(ticker):
     """Sector P/E medians for the ticker's own market."""
     if ticker.endswith(".CA"):
         return egx_pe_map()
-    for u in ("sp500", "us"):
-        if u in st.session_state.get("universes", {}):
-            return st.session_state.universes[u][1]
+    if "sp500" in st.session_state.get("universes", {}):
+        return st.session_state.universes["sp500"][1]
     return us_pe_map()
 
 
@@ -140,16 +139,13 @@ with tab_screen:
 
     cache = st.session_state.setdefault("universes", {})
     if uni not in cache or refresh:
-        wait = "~6 min" if uni == "us" else "~1–2 min"
-        bar = st.progress(0.0, f"Loading {uni_label} ({wait} first time each day)…")
+        bar = st.progress(0.0, f"Loading {uni_label} (~1–2 min first time each day)…")
         raw = data.load_universe(uni, progress=lambda p, msg: bar.progress(min(p, 1.0), msg),
                                  force=refresh)
         pe_map = egx_pe_map() if uni == "egx" else vd.sector_pe(raw)
         cache[uni] = (vd.add_to_frame(raw, pe_map), pe_map)
         bar.empty()
     df, pe_map = cache[uni]
-    bulk = uni == "us"
-    na_note = "Not available in bulk data for All US stocks" if bulk else None
 
     with st.expander("Filters", expanded=True):
         c1, c2, c3, c4, c5 = st.columns(5)
@@ -166,12 +162,9 @@ with tab_screen:
         c3.markdown("&nbsp;")
         eps_g_min = c3.number_input("Min fwd EPS growth %", -100.0, value=-100.0, step=5.0)
         roe_min = c3.number_input("Min ROE %", -100.0, value=-100.0, step=5.0)
-        growth_min = c3.number_input("Min revenue growth %", -100.0, value=-100.0, step=5.0,
-                                     disabled=bulk, help=na_note)
-        margin_min = c3.number_input("Min net margin %", -100.0, value=-100.0, step=5.0,
-                                     disabled=bulk, help=na_note)
-        de_max = c3.number_input("Max debt/equity (0 = any)", 0.0, value=0.0, step=0.5,
-                                 disabled=bulk, help=na_note)
+        growth_min = c3.number_input("Min revenue growth %", -100.0, value=-100.0, step=5.0)
+        margin_min = c3.number_input("Min net margin %", -100.0, value=-100.0, step=5.0)
+        de_max = c3.number_input("Max debt/equity (0 = any)", 0.0, value=0.0, step=0.5)
 
         c4.markdown("**Technical**")
         rsi_rng = c4.slider("RSI (14)", 0, 100, (0, 100))
@@ -201,13 +194,12 @@ with tab_screen:
         m &= df["eps_growth"] >= eps_g_min
     if roe_min > -100:
         m &= df["roe"] >= roe_min
-    if not bulk:
-        if growth_min > -100:
-            m &= df["rev_growth"] >= growth_min
-        if margin_min > -100:
-            m &= df["margin"] >= margin_min
-        if de_max:
-            m &= df["de"] <= de_max
+    if growth_min > -100:
+        m &= df["rev_growth"] >= growth_min
+    if margin_min > -100:
+        m &= df["margin"] >= margin_min
+    if de_max:
+        m &= df["de"] <= de_max
     if rsi_rng != (0, 100):
         m &= df["rsi"].between(*rsi_rng)
     if high_rng != (-100, 0):
@@ -225,10 +217,8 @@ with tab_screen:
 
     cols = ["ticker", "name", "sector", "price", "fund_verdict", "fund_target", "fund_upside",
             "tech_verdict", "tech_target", "tech_stop", "chg_1d", "chg_3m", "mcap_b", "pe",
-            "fwd_pe", "eps_growth", "roe"]
-    if not bulk:
-        cols += ["rev_growth", "margin", "de"]
-    cols += ["industry", "div_yield", "rsi", "vs_sma50", "vs_sma200", "from_high", "rel_vol", "avg_vol20"]
+            "fwd_pe", "eps_growth", "roe", "rev_growth", "margin", "de", "industry",
+            "div_yield", "rsi", "vs_sma50", "vs_sma200", "from_high", "rel_vol", "avg_vol20"]
     res = df.loc[m, cols].sort_values("mcap_b", ascending=False)
 
     ccy = "EGP" if uni == "egx" else "USD"

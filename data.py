@@ -8,14 +8,11 @@ import numpy as np
 import pandas as pd
 import requests
 import yfinance as yf
-from yfinance import EquityQuery as Q
-from yfinance.const import EQUITY_SCREENER_EQ_MAP
 
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)  # silence 404s for delisted tickers
 
 SP500_CSV = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
 CACHE_DIR = Path(__file__).parent / "cache"
-US_EXCHANGES = ["NMS", "NGM", "NCM", "NYQ", "ASE", "BTS", "PCX"]  # Nasdaq, NYSE, NYSE American, Cboe
 # Egypt: TradingView's public (unofficial) screener endpoint lists EGX stocks with fundamentals;
 # Yahoo ('.CA' suffix) supplies prices and fills missing EPS / book value.
 TV_EGX_URL = "https://scanner.tradingview.com/egypt/scan"
@@ -138,50 +135,6 @@ def fundamentals(ticker: str) -> dict:
     }
 
 
-def us_quotes(progress=None) -> pd.DataFrame:
-    """Basic fundamentals for every exchange-listed US stock via Yahoo's bulk screener."""
-    pairs = [(sec, ind) for sec, inds in EQUITY_SCREENER_EQ_MAP["industry"].items() for ind in sorted(inds)]
-    rows = []
-    for n, (sector, industry) in enumerate(pairs):
-        if progress:
-            progress(n / len(pairs) * 0.15, f"Listing {industry}…")
-        q = Q("and", [Q("is-in", ["exchange", *US_EXCHANGES]), Q("eq", ["industry", industry])])
-        offset = 0
-        while True:
-            r = yf.screen(q, size=250, offset=offset, sortField="intradaymarketcap", sortAsc=False)
-            quotes = r.get("quotes", [])
-            for x in quotes:
-                x["sector"], x["industry"] = sector, norm_industry(industry)
-            rows += quotes
-            offset += len(quotes)
-            if not quotes or offset >= r.get("total", 0):
-                break
-
-    out = []
-    for x in rows:
-        if x.get("quoteType") != "EQUITY" or not x.get("marketCap"):
-            continue
-        price = x.get("regularMarketPrice")
-        eps, bvps = x.get("epsTrailingTwelveMonths"), x.get("bookValue")
-        out.append({
-            "ticker": x["symbol"],
-            "name": x.get("shortName") or x.get("longName"),
-            "sector": x["sector"],
-            "industry": x["industry"],
-            "mcap_b": x["marketCap"] / 1e9,
-            "pe": x.get("trailingPE", np.nan),
-            "fwd_pe": x.get("forwardPE", np.nan),
-            "pb": x.get("priceToBook", np.nan),
-            "div_yield": _div(x.get("dividendRate") or 0, price, 100),
-            "eps_ttm": eps if eps is not None else np.nan,
-            "eps_fwd": x.get("epsForward", np.nan),
-            "roe": _div(eps, bvps, 100) if bvps and bvps > 0 else np.nan,  # EPS / book value per share
-            "margin": np.nan, "rev_growth": np.nan, "de": np.nan,  # not in bulk data
-            "rating": x.get("averageAnalystRating"),
-        })
-    return pd.DataFrame(out).drop_duplicates("ticker")
-
-
 def history(tickers, period="1y") -> dict[str, pd.DataFrame]:
     raw = yf.download(tickers, period=period, group_by="ticker", auto_adjust=True,
                       threads=True, progress=False)
@@ -272,7 +225,7 @@ def _technicals_bulk(tickers, progress, start, chunk=400) -> pd.DataFrame:
 
 
 def load_universe(name: str, progress=None, force=False) -> pd.DataFrame:
-    """'sp500', 'us' or 'egx': one row per stock, cached to disk once per day."""
+    """'sp500' or 'egx': one row per stock, cached to disk once per day."""
     CACHE_DIR.mkdir(exist_ok=True)
     path = CACHE_DIR / f"{name}_v2_{date.today()}.parquet"
     if path.exists() and not force:
@@ -282,7 +235,7 @@ def load_universe(name: str, progress=None, force=False) -> pd.DataFrame:
     if name == "egx":
         fund = egx_quotes(progress=progress)
         start = 0.3
-    elif name == "sp500":
+    else:
         tickers = sorted(sp)
         rows = []
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -292,14 +245,11 @@ def load_universe(name: str, progress=None, force=False) -> pd.DataFrame:
                     progress(n / len(tickers) * 0.7, f"Fundamentals {n}/{len(tickers)}…")
         fund = pd.DataFrame(rows)
         start = 0.7
-    else:
-        fund = us_quotes(progress)
-        start = 0.1
 
     fund["eps_growth"] = np.where(fund["eps_ttm"] > 0,
                                   (fund["eps_fwd"] / fund["eps_ttm"] - 1) * 100, np.nan)
     fund["industry"] = fund["industry"].map(norm_industry)
-    fund["in_sp500"] = fund["ticker"].isin(sp) if name != "egx" else False
+    fund["in_sp500"] = name == "sp500"
     tech = _technicals_bulk(fund["ticker"].tolist(), progress, start)
     df = fund.set_index("ticker").join(tech, how="left").reset_index()
     df = df.dropna(subset=["price"])
